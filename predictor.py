@@ -3,175 +3,96 @@ import json
 
 import openai
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 import pickle
 
 
-
 class Predictor:
-
     def __init__(self):
         self.model = None
-        
-        self.Train()
-        # Load LabelEncoders
+        self.train()
         label_encoders = self.load_label_encoders()
-
-        # Get book details from user input
         book_details = self.input_book_details()
-
-        # Predict if you'll like the book
         prediction = self.predict_liking(book_details, label_encoders)
-
-        # Print prediction result
         if prediction[0] == 1:
             print("You'll like this book!")
         else:
             print("You might not like this book.")
-    def Train(self):
-        # Load data
-        df = pd.read_csv('logs.csv',encoding='latin-1')
-        df = df.fillna(0)
 
-        # Preprocessing
-        df['Time_to_finish'] = (df['Time_to_finish']).fillna(0)
-        df['Pages'] = (df['Pages']).fillna(0)
-        df['Pages_Read'] = (df['Pages_Read']).fillna(0)
-        df['Century'] = (df['Century']).fillna(0)
+    def train(self):
+        df = pd.read_csv('logs.csv', encoding='latin-1')
+        df = df.fillna(method='ffill').fillna(method='bfill')  # Improved NaN handling
 
-        df['Year'] = df['Year'].astype(int)
-        df['Author_Nationality'] = df['Author_Nationality'].astype(str)
-        df['Genre'] = df['Genre'].astype(str)
-        df['Language'] = df['Language'].astype(str)
-        df['Source'] = df['Source'].astype(str)
-        df['Status'] = df['Status'].astype(str)
-        df['Key_Emotion'] = df['Key_Emotion'].astype(str)
-        df['Secondary_E'] = df['Secondary_E'].astype(str)
-        df['Topic'] = df['Topic'].astype(str)
+        # Create separate LabelEncoders for each categorical feature
+        label_encoders = {col: LabelEncoder() for col in
+                          ['Author_Nationality', 'Genre', 'Language', 'Topic', 'Source', 'Statu s', 'Key_Emotion',
+                           'Secondary_E']}
 
-
-
-        # Encode categorical variables
-        label_encoder = LabelEncoder()
-
-        df['Author_nationality_encoded'] = label_encoder.fit_transform(df['Author_Nationality'])
-        df['Genre_encoded'] = label_encoder.fit_transform(df['Genre'])
-        df['Language_encoded'] = label_encoder.fit_transform(df['Language'])
-        df['Topic_encoded'] = label_encoder.fit_transform(df['Topic'])
-        df['Source_encoded'] = label_encoder.fit_transform(df['Source'])
-        df['Status_encoded'] = label_encoder.fit_transform(df['Status'])
-        df['Year_encoded'] = label_encoder.fit_transform(df['Year'])
-        df['Keyemotion_encoded'] = label_encoder.fit_transform(df['Key_Emotion'])
-        df['Secemotion_encoded'] = label_encoder.fit_transform(df['Secondary_E'])
-
-        # Save LabelEncoder objects to files
-        label_encoders = {
-            'Author_nationality': label_encoder,
-            'Genre': label_encoder,
-            'Language': label_encoder,
-            'Topic': label_encoder,
-            'Source': label_encoder,
-            'Status': label_encoder,
-            'Year': label_encoder,
-            'Key_Emotion': label_encoder,
-            'Secondary_E': label_encoder
-        }
+        for col, encoder in label_encoders.items():
+            df[f'{col}_encoded'] = encoder.fit_transform(df[col].astype(str))
 
         with open('label_encoders.pkl', 'wb') as le_file:
             pickle.dump(label_encoders, le_file)
 
-        # Features and target variable
-        features = df[['Author_nationality_encoded', 'Genre_encoded', 'Language_encoded', 'Topic_encoded',
-                       'Source_encoded', 'Status_encoded', 'Keyemotion_encoded', 'Secemotion_encoded', 'Time_to_finish','Year_encoded']]
+        df['Completed'] = df['Status'].apply(lambda x: 1 if x == 'complete' else 0)
+
+        for col in ['Author_Nationality', 'Genre', 'Language', 'Topic']:
+            df[f'{col}_completed_count'] = df.apply(
+                lambda row: df[(df[col] == row[col]) & (df['Completed'] == 1)].shape[0], axis=1)
+
+        features = df[['Author_Nationality_encoded', 'Genre_encoded', 'Language_encoded', 'Topic_encoded',
+                       'Source_encoded', 'Status_encoded', 'Key_Emotion_encoded', 'Secondary_E_encoded',
+                       'Time_to_finish']]
         target = df['Liked']
-        X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
-        # Train a Random Forest classifier
-        self.model = RandomForestClassifier(n_estimators=100, random_state=42)
-        self.model.fit(X_train, y_train)
-        # Make predictions
+
+        # Feature scaling
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+
+        X_train, X_test, y_train, y_test = train_test_split(features_scaled, target, test_size=0.2, random_state=42)
+
+        # Hyperparameter tuning with GridSearchCV
+        param_grid = {
+            'n_estimators': [100, 200, 300],
+            'max_depth': [None, 10, 20, 30],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 4]
+        }
+        grid_search = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=5, n_jobs=-1, verbose=2)
+        grid_search.fit(X_train, y_train)
+
+        self.model = grid_search.best_estimator_
+
         y_pred = self.model.predict(X_test)
-        # Evaluate the self.model
+        print("Best Parameters:", grid_search.best_params_)
         print("Accuracy:", accuracy_score(y_test, y_pred))
         print("Classification Report:\n", classification_report(y_test, y_pred))
-    def load_label_encoders(self,filename='label_encoders.pkl'):
+
+    def load_label_encoders(self, filename='label_encoders.pkl'):
         with open(filename, 'rb') as le_file:
             label_encoders = pickle.load(le_file)
         return label_encoders
-    def predict_liking(self,book_details, label_encoders):
-        # Load LabelEncoders from file
-        author_nationality_encoder = label_encoders['Author_nationality']
-        genre_encoder = label_encoders['Genre']
-        language_encoder = label_encoders['Language']
-        topic_encoder = label_encoders['Topic']
-        source_encoder = label_encoders['Source']
-        status_encoder = label_encoders['Status']
-        year_encoder = label_encoders['Year']
-        keyemotion_encoder = label_encoders['Key_Emotion']
-        secemotion_encoder = label_encoders['Secondary_E']
 
-        # Convert input details to DataFrame
+    def predict_liking(self, book_details, label_encoders):
         book_df = pd.DataFrame([book_details])
 
-        # Encode categorical variables using loaded LabelEncoders
-        try:
-            book_df['Author_nationality_encoded'] = author_nationality_encoder.transform(book_df['Author_nationality'].astype(str))
-        except ValueError:
-            # Handle unseen label for Author Nationality
-            # Example fallback: Assign a default value or handle it based on your domain knowledge
-            book_df['Author_nationality_encoded'] = -1  # Assigning a default value
+        for col, encoder in label_encoders.items():
+            try:
+                book_df[f'{col}_encoded'] = encoder.transform(book_df[col].astype(str))
+            except ValueError:
+                book_df[f'{col}_encoded'] = -1
 
-        try:
-            book_df['Genre_encoded'] = genre_encoder.transform(book_df['Genre'].astype(str))
-        except ValueError:
-            book_df['Genre_encoded'] = -1  # Assigning a default value
+        features_input = book_df[[f'{col}_encoded' for col in label_encoders] + ['Time_to_finish']]
 
-        try:
-            book_df['Language_encoded'] = language_encoder.transform(book_df['Language'].astype(str))
-        except ValueError:
-            book_df['Language_encoded'] = -1  # Assigning a default value
+        scaler = StandardScaler()
+        features_input_scaled = scaler.fit_transform(features_input)
 
-        try:
-            book_df['Topic_encoded'] = topic_encoder.transform(book_df['Topic'].astype(str))
-        except ValueError:
-            book_df['Topic_encoded'] = -1  # Assigning a default value
-
-        try:
-            book_df['Source_encoded'] = source_encoder.transform(book_df['Source'].astype(str))
-        except ValueError:
-            book_df['Source_encoded'] = -1  # Assigning a default value
-
-        try:
-            book_df['Status_encoded'] = status_encoder.transform(book_df['Status'].astype(str))
-        except ValueError:
-            book_df['Status_encoded'] = -1  # Assigning a default value
-
-        try:
-            book_df['Year_encoded'] = year_encoder.transform(book_df['Year'].astype(int))
-        except ValueError:
-            book_df['Year_encoded'] = -1  # Assigning a default value
-
-        try:
-            book_df['Keyemotion_encoded'] = keyemotion_encoder.transform(book_df['Key_Emotion'].astype(str))
-        except ValueError:
-            book_df['Keyemotion_encoded'] = -1  # Assigning a default value
-
-        try:
-            book_df['Secemotion_encoded'] = secemotion_encoder.transform(book_df['Secondary_E'].astype(str))
-        except ValueError:
-            book_df['Secemotion_encoded'] = -1  # Assigning a default value
-
-        # Extract features from input DataFrame
-        features_input = book_df[['Author_nationality_encoded', 'Genre_encoded', 'Language_encoded',
-                                  'Topic_encoded', 'Source_encoded', 'Status_encoded', 'Keyemotion_encoded',
-                                  'Secemotion_encoded', 'Time_to_finish', 'Year_encoded']]
-
-        # Make prediction using trained self.model
-        prediction = self.model.predict(features_input)
-
+        prediction = self.model.predict(features_input_scaled)
         return prediction
+
     def input_book_details(self):
         print("Enter book name:")
         book_name = input("")
@@ -193,7 +114,7 @@ class Predictor:
                                     "dictionary accordingly with the info and give me it raw, without the variable "
                                     "declaration. Just the dictionary. Don't reply with anything else other than the "
                                     "dictionary. Put it all but the numbers in double quotes. There are some "
-                                    "rules.\nPossible inputs:\n\"Author_nationality\" can ONLY equal European, Brazilian, "
+                                    "rules.\nPossible inputs:\n\"Author_Nationality\" can ONLY equal European, Brazilian, "
                                     "American/Canadian, Greek and Other\n\"Genre\" can ONLY equal Novel,History,"
                                     "Philosophy,Fantasy,Fable,Article,Science Fiction and Non-Fiction\n\"Topic\" can ONLY "
                                     "equal Self,Brazil,Generic,History,Fantasy,Art,Science,Drama and Society\nCentury "
@@ -231,7 +152,7 @@ class Predictor:
             'Secondary_E': secondary_emotion,
             'Year': year,
             'Source': source,
-            'Author_nationality': autocompleted_dict['Author_Nationality'],
+            'Author_Nationality': autocompleted_dict['Author_Nationality'],
             'Genre': autocompleted_dict['Genre'],
             'Topic': autocompleted_dict['Topic'],
             'Century': autocompleted_dict['Century'],
